@@ -1,137 +1,226 @@
+import init, { VoiceShifter } from "./wasm/voice_core.js";
 export type VoiceType = {
   name: string;
   semitones: number;
 };
 
+export type FormantProfile = {
+  f1: number;
+  f2: number;
+  f3: number;
+  gain: number;
+};
+
 export const VOICE_TYPES: VoiceType[] = [
-  { name: "Soprano",  semitones: 8  },
-  { name: "Mezzo",    semitones: 5  },
+  { name: "Soprano",  semitones: 4  },
+  { name: "Mezzo",    semitones: 3  },
   { name: "Alto",     semitones: 2  },
   { name: "Tenor",    semitones: 0  },
-  { name: "Baritone", semitones: -3 },
-  { name: "Bass",     semitones: -7 },
+  { name: "Baritone", semitones: -2 },
+  { name: "Bass",     semitones: -3 },
 ];
+
+export const FORMANT_PROFILES: Record<string, FormantProfile> = {
+  Soprano:  { f1: 800,  f2: 1200, f3: 2800, gain: 1.1 },
+  Mezzo:    { f1: 600,  f2: 1100, f3: 2600, gain: 1.1 },
+  Alto:     { f1: 500,  f2: 1000, f3: 2500, gain: 1.0 },
+  Tenor:    { f1: 400,  f2: 900,  f3: 2400, gain: 1.0 },
+  Baritone: { f1: 350,  f2: 800,  f3: 2200, gain: 0.9 },
+  Bass:     { f1: 300,  f2: 700,  f3: 2000, gain: 0.9 },
+};
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private stream: MediaStream | null = null;
-  private micSource: MediaStreamAudioSourceNode | null = null;
   private recordedBuffer: AudioBuffer | null = null;
   private mediaRecorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private currentSource: AudioBufferSourceNode | null = null;
-  private isProcessing: boolean = false;
+  private shifter: VoiceShifter | null = null;
 
   async init(): Promise<void> {
     this.ctx = new AudioContext();
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 512;
-    // analyser is NOT connected to destination
-    // it is only used for visualisation
   }
+  async initWasm(): Promise<void> {
+  await init();
+  this.shifter = new VoiceShifter(44100);
+}
 
   async requestMic(): Promise<void> {
-    if (!this.ctx) await this.init();
-    if (this.stream) return;
-
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        sampleRate: 44100,
-      }
-    });
-
-    // Create mic source but do NOT connect to destination
-    // Only connect to analyser for waveform drawing
-    this.micSource = this.ctx!.createMediaStreamSource(this.stream);
-    this.micSource.connect(this.analyser!);
-    // analyser intentionally left disconnected from ctx.destination
-  }
+  if (!this.ctx) await this.init();
+  if (this.stream) return;
+  this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // Do NOT connect mic source to analyser — this causes feedback through earphones
+  // MediaRecorder reads directly from the stream, no audio graph connection needed
+}
 
   startRecording(): void {
     if (!this.stream) throw new Error("Mic not initialized");
-    if (this.isProcessing) return;
-
     this.chunks = [];
     this.mediaRecorder = new MediaRecorder(this.stream);
-
-    this.mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) this.chunks.push(e.data);
-    };
-
+    this.mediaRecorder.ondataavailable = (e) => this.chunks.push(e.data);
     this.mediaRecorder.onstop = () => this.processAudio();
     this.mediaRecorder.start();
   }
 
   stopRecording(): void {
-    if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
-      this.isProcessing = true;
-      this.mediaRecorder.stop();
-    }
+    this.mediaRecorder?.stop();
   }
 
   private async processAudio(): Promise<void> {
-    try {
-      const blob = new Blob(this.chunks, { type: "audio/webm" });
-      const arrayBuffer = await blob.arrayBuffer();
-      this.recordedBuffer = await this.ctx!.decodeAudioData(arrayBuffer);
-    } catch (e) {
-      console.error("Failed to process audio:", e);
-    } finally {
-      this.isProcessing = false;
-    }
+    const blob = new Blob(this.chunks, { type: "audio/webm" });
+    const arrayBuffer = await blob.arrayBuffer();
+    this.recordedBuffer = await this.ctx!.decodeAudioData(arrayBuffer);
   }
 
-  stopPlayback(): void {
-    if (this.currentSource) {
-      try {
-        this.currentSource.stop();
-        this.currentSource.disconnect();
-      } catch {}
-      this.currentSource = null;
-    }
+  private buildFormantFilters(
+    ctx: BaseAudioContext,
+    profile: FormantProfile
+  ): { input: AudioNode; output: GainNode } {
+    const splitter = ctx.createGain();
+
+    const f1 = ctx.createBiquadFilter();
+    f1.type = "bandpass";
+    f1.frequency.value = profile.f1;
+    f1.Q.value = 5;
+
+    const f2 = ctx.createBiquadFilter();
+    f2.type = "bandpass";
+    f2.frequency.value = profile.f2;
+    f2.Q.value = 8;
+
+    const f3 = ctx.createBiquadFilter();
+    f3.type = "bandpass";
+    f3.frequency.value = profile.f3;
+    f3.Q.value = 10;
+
+    const dry = ctx.createGain();
+    dry.gain.value = 0.7;
+
+    const g1 = ctx.createGain();
+    g1.gain.value = 0.4;
+
+    const g2 = ctx.createGain();
+    g2.gain.value = 0.3;
+
+    const g3 = ctx.createGain();
+    g3.gain.value = 0.2;
+
+    const merger = ctx.createGain();
+    merger.gain.value = profile.gain;
+
+    splitter.connect(dry);
+    splitter.connect(f1);
+    splitter.connect(f2);
+    splitter.connect(f3);
+
+    f1.connect(g1);
+    f2.connect(g2);
+    f3.connect(g3);
+
+    dry.connect(merger);
+    g1.connect(merger);
+    g2.connect(merger);
+    g3.connect(merger);
+
+    return { input: splitter, output: merger };
   }
 
-  playShifted(semitones: number, fineOffset: number = 0, onEnd?: () => void): void {
+  playShifted(semitones: number, fineOffset: number = 0, voiceName: string = "Tenor"): void {
     if (!this.recordedBuffer || !this.ctx) return;
 
-    // Stop previous playback first
-    this.stopPlayback();
+    if (this.currentSource) {
+      this.currentSource.disconnect();
+      this.currentSource.stop();
+      this.currentSource = null;
+    }
 
     const total = semitones + fineOffset;
+    const profile = FORMANT_PROFILES[voiceName] ?? FORMANT_PROFILES["Tenor"];
 
     const source = this.ctx.createBufferSource();
     source.buffer = this.recordedBuffer;
-
-    // detune shifts pitch in cents without changing speed
-    // 100 cents = 1 semitone
     source.detune.value = total * 100;
 
+    const formant = this.buildFormantFilters(this.ctx, profile);
+
     const gain = this.ctx.createGain();
-    gain.gain.value = 1.0;
+    gain.gain.value = 1.2;
 
-    // source → gain → destination (NOT through analyser)
-    source.connect(gain);
-    gain.connect(this.ctx.destination);
-
-    // Separately tap into analyser for visualisation only
-    source.connect(this.analyser!);
+    // Clean signal chain
+    source.connect(formant.input);
+    formant.output.connect(gain);
+    gain.connect(this.analyser!);
+    this.analyser!.connect(this.ctx.destination);
 
     source.start();
     this.currentSource = source;
 
     source.onended = () => {
-      this.stopPlayback();
-      onEnd?.();
+      if (this.currentSource === source) {
+        this.currentSource = null;
+      }
     };
   }
+  playWithWasm(semitones: number, fineOffset: number = 0): void {
+  if (!this.recordedBuffer || !this.ctx || !this.shifter) return;
 
-  async exportShifted(semitones: number, fineOffset: number = 0): Promise<void> {
+  if (this.currentSource) {
+    this.currentSource.disconnect();
+    this.currentSource.stop();
+    this.currentSource = null;
+  }
+
+  const total = semitones + fineOffset;
+  this.shifter.set_pitch_semitones(total);
+
+  // Get raw PCM samples from recorded buffer
+  const inputData = this.recordedBuffer.getChannelData(0);
+
+  // Process through Rust phase vocoder
+  const outputData = this.shifter.process(inputData);
+
+  // Create a new AudioBuffer from the processed samples
+  const processedBuffer = this.ctx.createBuffer(
+    1,
+    outputData.length,
+    this.recordedBuffer.sampleRate
+  );
+  processedBuffer.copyToChannel(outputData, 0);
+
+  // Play the processed buffer
+  const source = this.ctx.createBufferSource();
+  source.buffer = processedBuffer;
+
+  const gain = this.ctx.createGain();
+  gain.gain.value = 1.2;
+
+  source.connect(gain);
+  gain.connect(this.analyser!);
+  this.analyser!.connect(this.ctx.destination);
+
+  source.start();
+  this.currentSource = source;
+
+  source.onended = () => {
+    if (this.currentSource === source) {
+      this.currentSource = null;
+    }
+  };
+}
+
+isWasmReady(): boolean {
+  return this.shifter !== null;
+}
+
+  async exportShifted(semitones: number, fineOffset: number = 0, voiceName: string = "Tenor"): Promise<void> {
     if (!this.recordedBuffer) throw new Error("No recording found");
 
     const total = semitones + fineOffset;
+    const profile = FORMANT_PROFILES[voiceName] ?? FORMANT_PROFILES["Tenor"];
 
     const offlineCtx = new OfflineAudioContext(
       this.recordedBuffer.numberOfChannels,
@@ -142,7 +231,11 @@ export class AudioEngine {
     const source = offlineCtx.createBufferSource();
     source.buffer = this.recordedBuffer;
     source.detune.value = total * 100;
-    source.connect(offlineCtx.destination);
+
+    const formant = this.buildFormantFilters(offlineCtx, profile);
+
+    source.connect(formant.input);
+    formant.output.connect(offlineCtx.destination);
     source.start();
 
     const renderedBuffer = await offlineCtx.startRendering();
@@ -152,7 +245,7 @@ export class AudioEngine {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `voice-shifted-${total > 0 ? "+" : ""}${total}st.wav`;
+    a.download = `voice-${voiceName.toLowerCase()}.wav`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -202,10 +295,6 @@ export class AudioEngine {
 
   hasRecording(): boolean {
     return this.recordedBuffer !== null;
-  }
-
-  isReady(): boolean {
-    return !this.isProcessing;
   }
 
   getDuration(): number {
