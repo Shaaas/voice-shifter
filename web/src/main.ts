@@ -6,9 +6,8 @@ const ui = new UI(engine);
 
 ui.render();
 
-// Initialize WASM in background
 engine.initWasm().then(() => {
-  console.log("WASM voice engine ready");
+  console.log("[Polyphon] WASM phase vocoder ready");
 }).catch((e) => {
-  console.warn("WASM init failed, falling back to JS engine", e);
+  console.warn("[Polyphon] WASM unavailable, using JS engine", e);
 });

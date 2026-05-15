@@ -12,21 +12,21 @@ export type FormantProfile = {
 };
 
 export const VOICE_TYPES: VoiceType[] = [
-  { name: "Soprano",  semitones: 4  },
-  { name: "Mezzo",    semitones: 3  },
+  { name: "Soprano",  semitones: 6  },
+  { name: "Mezzo",    semitones: 4  },
   { name: "Alto",     semitones: 2  },
   { name: "Tenor",    semitones: 0  },
-  { name: "Baritone", semitones: -2 },
-  { name: "Bass",     semitones: -3 },
+  { name: "Baritone", semitones: -3 },
+  { name: "Bass",     semitones: -5 },
 ];
 
 export const FORMANT_PROFILES: Record<string, FormantProfile> = {
-  Soprano:  { f1: 800,  f2: 1200, f3: 2800, gain: 1.1 },
-  Mezzo:    { f1: 600,  f2: 1100, f3: 2600, gain: 1.1 },
-  Alto:     { f1: 500,  f2: 1000, f3: 2500, gain: 1.0 },
+  Soprano:  { f1: 900,  f2: 1400, f3: 3200, gain: 1.2 },
+  Mezzo:    { f1: 700,  f2: 1200, f3: 2900, gain: 1.1 },
+  Alto:     { f1: 550,  f2: 1050, f3: 2600, gain: 1.0 },
   Tenor:    { f1: 400,  f2: 900,  f3: 2400, gain: 1.0 },
-  Baritone: { f1: 350,  f2: 800,  f3: 2200, gain: 0.9 },
-  Bass:     { f1: 300,  f2: 700,  f3: 2000, gain: 0.9 },
+  Baritone: { f1: 350,  f2: 750,  f3: 2100, gain: 0.9 },
+  Bass:     { f1: 280,  f2: 620,  f3: 1800, gain: 0.85 },
 };
 
 export class AudioEngine {
@@ -75,60 +75,65 @@ export class AudioEngine {
     const arrayBuffer = await blob.arrayBuffer();
     this.recordedBuffer = await this.ctx!.decodeAudioData(arrayBuffer);
   }
+private buildFormantFilters(
+  ctx: BaseAudioContext,
+  profile: FormantProfile,
+  voiceName: string = "Tenor"
+): { input: AudioNode; output: GainNode } {
+  const splitter = ctx.createGain();
 
-  private buildFormantFilters(
-    ctx: BaseAudioContext,
-    profile: FormantProfile
-  ): { input: AudioNode; output: GainNode } {
-    const splitter = ctx.createGain();
+  // Lower voices need much lower Q to avoid ringing
+  const isLow = voiceName === "Bass" || voiceName === "Baritone";
+  const isHigh = voiceName === "Soprano" || voiceName === "Mezzo";
 
-    const f1 = ctx.createBiquadFilter();
-    f1.type = "bandpass";
-    f1.frequency.value = profile.f1;
-    f1.Q.value = 5;
+  const f1 = ctx.createBiquadFilter();
+  f1.type = "bandpass";
+  f1.frequency.value = profile.f1;
+  f1.Q.value = isLow ? 0.8 : isHigh ? 2.5 : 1.5;
 
-    const f2 = ctx.createBiquadFilter();
-    f2.type = "bandpass";
-    f2.frequency.value = profile.f2;
-    f2.Q.value = 8;
+  const f2 = ctx.createBiquadFilter();
+  f2.type = "bandpass";
+  f2.frequency.value = profile.f2;
+  f2.Q.value = isLow ? 1.0 : isHigh ? 3.0 : 2.0;
 
-    const f3 = ctx.createBiquadFilter();
-    f3.type = "bandpass";
-    f3.frequency.value = profile.f3;
-    f3.Q.value = 10;
+  const f3 = ctx.createBiquadFilter();
+  f3.type = "bandpass";
+  f3.frequency.value = profile.f3;
+  f3.Q.value = isLow ? 1.2 : isHigh ? 3.5 : 2.5;
 
-    const dry = ctx.createGain();
-    dry.gain.value = 0.7;
+  // Low voices need more dry to avoid ringing
+  // High voices need less dry to sound more transformed
+  const dry = ctx.createGain();
+  dry.gain.value = isLow ? 0.9 : isHigh ? 0.6 : 0.8;
 
-    const g1 = ctx.createGain();
-    g1.gain.value = 0.4;
+  const g1 = ctx.createGain();
+  g1.gain.value = isLow ? 0.15 : isHigh ? 0.35 : 0.25;
 
-    const g2 = ctx.createGain();
-    g2.gain.value = 0.3;
+  const g2 = ctx.createGain();
+  g2.gain.value = isLow ? 0.12 : isHigh ? 0.30 : 0.20;
 
-    const g3 = ctx.createGain();
-    g3.gain.value = 0.2;
+  const g3 = ctx.createGain();
+  g3.gain.value = isLow ? 0.08 : isHigh ? 0.20 : 0.12;
 
-    const merger = ctx.createGain();
-    merger.gain.value = profile.gain;
+  const merger = ctx.createGain();
+  merger.gain.value = profile.gain;
 
-    splitter.connect(dry);
-    splitter.connect(f1);
-    splitter.connect(f2);
-    splitter.connect(f3);
+  splitter.connect(dry);
+  splitter.connect(f1);
+  splitter.connect(f2);
+  splitter.connect(f3);
 
-    f1.connect(g1);
-    f2.connect(g2);
-    f3.connect(g3);
+  f1.connect(g1);
+  f2.connect(g2);
+  f3.connect(g3);
 
-    dry.connect(merger);
-    g1.connect(merger);
-    g2.connect(merger);
-    g3.connect(merger);
+  dry.connect(merger);
+  g1.connect(merger);
+  g2.connect(merger);
+  g3.connect(merger);
 
-    return { input: splitter, output: merger };
-  }
-
+  return { input: splitter, output: merger };
+}
   playShifted(semitones: number, fineOffset: number = 0, voiceName: string = "Tenor"): void {
     if (!this.recordedBuffer || !this.ctx) return;
 
@@ -145,7 +150,7 @@ export class AudioEngine {
     source.buffer = this.recordedBuffer;
     source.detune.value = total * 100;
 
-    const formant = this.buildFormantFilters(this.ctx, profile);
+const formant = this.buildFormantFilters(this.ctx, profile, voiceName);
 
     const gain = this.ctx.createGain();
     gain.gain.value = 1.2;
@@ -232,7 +237,7 @@ isWasmReady(): boolean {
     source.buffer = this.recordedBuffer;
     source.detune.value = total * 100;
 
-    const formant = this.buildFormantFilters(offlineCtx, profile);
+const formant = this.buildFormantFilters(offlineCtx, profile, voiceName);
 
     source.connect(formant.input);
     formant.output.connect(offlineCtx.destination);
