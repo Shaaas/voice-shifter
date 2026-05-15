@@ -1,0 +1,15 @@
+{
+  "name": "voice_core",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "voice_core_bg.wasm",
+    "voice_core.js",
+    "voice_core.d.ts"
+  ],
+  "main": "voice_core.js",
+  "types": "voice_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
